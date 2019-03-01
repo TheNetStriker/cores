@@ -79,6 +79,9 @@ static volatile uint8_t transmitting = 0;
   #define rts_assert()        *(rts_pin+8) = rts_mask;
   #define rts_deassert()      *(rts_pin+4) = rts_mask;
 #endif
+#ifdef SERIAL_SINGLEWIRE_SUPPORT
+  static volatile uint8_t single_wire=0;
+#endif
 #if SERIAL3_TX_BUFFER_SIZE > 255
 static volatile uint16_t tx_buffer_head = 0;
 static volatile uint16_t tx_buffer_tail = 0;
@@ -152,7 +155,21 @@ void serial3_format(uint32_t format)
 	c = UART2_C1;
 	c = (c & ~0x13) | (format & 0x03);	// configure parity
 	if (format & 0x04) c |= 0x10;		// 9 bits (might include parity)
-	UART2_C1 = c;
+#ifdef SERIAL_SINGLEWIRE_SUPPORT
+	c = c & ~( 0x80 );                      // ToDo: Check what happens when we clear RSRC and set TXDIR
+	if ( format & SERIAL_SINGLEWIRE_BITMASK ) {
+		c = c | ( 0x80 | 0x20 );              // single wire mode - set C1[LOOPS = 7] and C1[RSRC = 5]
+		UART2_C1 = c;
+		c = UART2_C3 & ~0x20;                 // single wire mode also wants the C3[TXDIR = 5] to be cleared so it's listening
+		UART2_C3 = c;
+		single_wire = 1;                      // make sure there's a flag set so it can be toggled when necessary
+	} else {
+		UART2_C1 = c;
+		single_wire = 0;
+	}
+#else
+	UART2_C1 = c;                           // save that c value from above
+#endif
 	if ((format & 0x0F) == 0x04) UART2_C3 |= 0x40; // 8N2 is 9 bit with 9th bit always 1
 	c = UART2_S2 & ~0x10;
 	if (format & 0x10) c |= 0x10;		// rx invert
@@ -195,9 +212,9 @@ void serial3_end(void)
 		case 8:  CORE_PIN8_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(1); break;
 		case 20: CORE_PIN20_CONFIG = PORT_PCR_PE | PORT_PCR_PS | PORT_PCR_MUX(1); break;
 	}
-	#endif	
+	#endif
 	UART2_S1;
-	UART2_D; // clear leftover error status
+	UART2_D; // clear leftover error status	
 	rx_buffer_head = 0;
 	rx_buffer_tail = 0;
 	if (rts_pin) rts_deassert();
@@ -309,6 +326,9 @@ void serial3_putchar(uint32_t c)
 
 	if (!(SIM_SCGC4 & SIM_SCGC4_UART2)) return;
 	if (transmit_pin) transmit_assert();
+#ifdef SERIAL_SINGLEWIRE_SUPPORT
+	if (single_wire) UART2_C3 = UART2_C3 | 0x20;
+#endif
 	head = tx_buffer_head;
 	if (++head >= SERIAL3_TX_BUFFER_SIZE) head = 0;
 	while (tx_buffer_tail == head) {
@@ -450,6 +470,9 @@ void uart2_status_isr(void)
 	if ((c & UART_C2_TCIE) && (UART2_S1 & UART_S1_TC)) {
 		transmitting = 0;
 		if (transmit_pin) transmit_deassert();
+#ifdef SERIAL_SINGLEWIRE_SUPPORT
+		if (single_wire) UART2_C3 = UART2_C3 & ~0x20;
+#endif
 		UART2_C2 = C2_TX_INACTIVE;
 	}
 }
